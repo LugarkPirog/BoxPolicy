@@ -1,8 +1,9 @@
 import tensorflow as tf
 from BoxModel.main import Env
 
+
 class PolicyAgent:
-    def __init__(self, state_dim, action_dim, name='Policy'):
+    def __init__(self, state_dim, action_dim, name='Policy', savedir='c:/users/sabak/desktop/Policy/model'):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.name = name
@@ -19,6 +20,8 @@ class PolicyAgent:
             self.grad_placeholders,\
             self.tr_step = self.create_updater()
 
+        self.saver = tf.train.Saver(self.net)
+        self.savedir = savedir
         self.sess.run(tf.global_variables_initializer())
 
     def create_network(self, layer_sizes):
@@ -26,16 +29,12 @@ class PolicyAgent:
             state_in = tf.placeholder(tf.float32, (None, self.state_dim), name='state_in')
             with tf.variable_scope('layer1'):
                 w1 = tf.get_variable('w', (self.state_dim, layer_sizes[0]))
-                b1 = tf.Variable(tf.zeros((layer_sizes[0],)),name='b')
-                l1 = tf.nn.relu(tf.matmul(state_in / 150., w1) + b1)
+                b1 = tf.Variable(tf.zeros((layer_sizes[0],)), name='b')
+                l1 = tf.nn.relu(tf.matmul(state_in / 80., w1) + b1)
             with tf.variable_scope('layer2'):
-                w2 = tf.get_variable('w', (layer_sizes[0], layer_sizes[1]))
-                b2 = tf.Variable(tf.zeros((layer_sizes[1],)), name='b')
-                l2 = tf.nn.relu(tf.matmul(l1, w2) + b2)
-            with tf.variable_scope('layer3'):
                 w3 = tf.get_variable('w', (layer_sizes[1], self.action_dim))
                 b3 = tf.Variable(tf.zeros((self.action_dim,)), name='b')
-                out = tf.nn.softmax(tf.matmul(l2, w3) + b3)
+                out = tf.nn.softmax(tf.matmul(l1, w3) + b3)
             picked = tf.argmax(out, axis=-1)
             vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.name)
         return state_in, out, picked, vars
@@ -51,8 +50,7 @@ class PolicyAgent:
         grad_plh = []
         for var in self.net:
             grad_plh.append(tf.placeholder(tf.float32, name=var.name[:-2]+'_holder'))
-
-        up = tf.train.AdamOptimizer(1e-3)
+        up = tf.train.AdamOptimizer(1e-4)
         tr_step = up.apply_gradients(zip(grad_plh, self.net))
         return q_target, act_placeholder, loss, grads, grad_plh, tr_step
 
@@ -63,10 +61,10 @@ class PolicyAgent:
         return self.sess.run(self.action_output, feed_dict={self.state_input:states})
 
     def save(self):
-        pass
+        self.saver.save(self.sess, self.savedir)
 
     def load(self):
-        pass
+        self.saver.restore(self.sess, self.savedir)
 
     def get_grads(self, states, actions, rewards):
         return self.sess.run(self.grads, feed_dict={self.state_input:states,
@@ -87,19 +85,17 @@ def get_discounted_reward(arr, gamma=.98):
 
 
 def process_distances(arr):
-    last = abs(arr[0])
-    ans = []
-    for i in range(1, len(arr)):
-        ans.append(int(abs(arr[i]) < last))
-        last = abs(arr[i])
-    return ans + ans[-1:] if abs(arr[-1]) > 1. else ans + [50]
+    ans = [-1]*(len(arr))
+    return ans #+ [-1] if abs(arr[-1]) > 1.6 else ans + [70]
+
+
 
 if __name__ == '__main__1':
     import numpy as np
-    env = Env(max_steps=250)
+    env = Env(1.7, 0.05, 0.05, 0.05, max_steps=250, range_=(40., 120.))
     iters = []
     for _ in range(1000):
-        env.set_manual_game(150., 10.)
+        env.set_manual_game(120., 40.)
         done = False
         i = 0
         while not done:
@@ -111,59 +107,85 @@ if __name__ == '__main__1':
     print(np.mean(iters))
 
 if __name__ == '__main__':
+    import pickle
     import numpy as np
-    env = Env(max_steps=150)
-    agent = PolicyAgent(2, 3)
+    env = Env(max_steps=100, range_=(40., 120.))
+    agent = PolicyAgent(3, 3)
 
-    rounds = 30000
-    update_every = 30
+    rounds = 10000
+    update_every = 5
     verbose = 100
     gs = 0
     total_rewards = []
-    total_len= []
+    total_len = []
     #env.set_manual_game(140.,100.)
     env.reset()
-
+    all_buffer = []
     grad_buffer = np.array([tf.zeros_like(k).eval(session=agent.sess) for k in agent.net])
     data = []
-    for r in range(rounds):
-        gs += 1
-        state = env.get_state()
-        target = env.get_target()
-        if abs(state - target) < 1:
-            #env.set_manual_game(140., 100.)
-            env.reset()
-            continue
-        buffer = []
-        state_from, state_to = state, target
-        step = 0
-        while True:
-            step += 1
-            act = agent.get_action_distr(np.reshape([state, target], (-1, 2)))
-            act = np.random.choice([0, 1, 2], p=act[0])
-            new_state, distance, done = env.step(act)
-            buffer.append([[state, target], act, distance, done])
-            state = new_state
-            if done:
-                buffer = np.array(buffer)
-                states = np.vstack(buffer[:,0])
-                actions = np.asarray(buffer[:,1])
-                pd = process_distances(buffer[:, 2], )
-                rewards = np.asarray(get_discounted_reward(pd))
-
-                grads = agent.get_grads(states, actions, rewards)
-                for ix, gr in enumerate(grads):
-                    grad_buffer[ix] += gr
+    # todo: from 1 state to another with increasing noise and random swap
+    try:
+        for r in range(rounds):
+            gs += 1
+            state = env.get_state()
+            target = env.get_target()
+            if gs % 2 == 0 and state < target:
+                env.set_manual_game(target, state)
+                state, target = target, state
+            elif gs % 2 == 1 and state > target:
+                env.set_manual_game(target, state)
+                state, target = target, state
+            if abs(state - target) < 1:
                 #env.set_manual_game(140., 100.)
                 env.reset()
-                total_rewards.append(np.mean(pd))
-                total_len.append(step)
-                break
-        data.append((state_from, state_to, step))
-        if gs % update_every == update_every - 1:
-            agent.update(grad_buffer)
-        if r % verbose == verbose - 1:
-            print(r+1, np.mean(total_rewards[-verbose:]), np.mean(total_len[-verbose:]))
-
-    import pandas as pd
-    pd.DataFrame(data).to_csv('/home/user/Desktop/policy_results.csv')
+                continue
+            buffer = []
+            state_from, state_to = state, target
+            step = 0
+            while True:
+                step += 1
+                act = agent.get_actions(np.reshape([state, target, state-target], (-1, 3)))[0]
+                #act = np.random.choice([0, 1, 2], p=act[0])
+                new_state, distance, done = env.step(act)
+                buffer.append([[state, target, state-target], act, distance, done])
+                state = new_state
+                if done:
+                    buffer = np.array(buffer)
+                    states = np.vstack(buffer[:, 0])
+                    actions = np.asarray(buffer[:, 1])
+                    #pd = process_distances(buffer[:, 2])
+                    #rewards = np.asarray(get_discounted_reward(pd, .99))
+                    rewards = -np.abs(np.asarray(get_discounted_reward(buffer[:, 2], .99)))
+                    grads = agent.get_grads(states, actions, rewards)
+                    for ix, gr in enumerate(grads):
+                        grad_buffer[ix] += gr
+                    #env.set_manual_game(140., 100.)
+                    env.reset()
+                    #print(rewards[-1])
+                    try:
+                        total_rewards.append(rewards[-1])
+                        total_len.append(step)
+                    except IndexError:
+                        print(r, 'fok')
+                    break
+            data.append((state_from, state_to, step))
+            all_buffer.append(buffer)
+            if gs % update_every == update_every - 1:
+                agent.update(grad_buffer)
+            if r % verbose == verbose - 1:
+                print(r+1, np.mean(total_rewards[-verbose:]), np.mean(total_len[-verbose:]))
+                print(state_from, state_to, state_from - state_to)
+                print (actions)
+    #    raise KeyboardInterrupt
+    except KeyboardInterrupt:
+        pass
+    finally:
+        a = input("save? y/n:")
+        if a == 'n':
+            exit(0)
+        agent.save()
+        import pandas as pd
+        with open('c:/users/sabak/desktop/buffer1.pkl', 'wb') as f:
+            pickle.dump(all_buffer, f)
+            f.close()
+        pd.DataFrame(data).to_csv('c:/users/sabak/desktop/policy_results1.csv')
