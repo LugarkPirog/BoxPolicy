@@ -45,7 +45,7 @@ class PolicyAgent:
         resp_inds = tf.range(0, tf.shape(self.action_output)[0])*self.action_dim + act_placeholder
         resp_outs = tf.gather(tf.reshape(self.action_output, [-1]), resp_inds)
 
-        loss = -tf.reduce_mean(tf.log(resp_outs)*q_target)
+        loss = -tf.reduce_mean(tf.log(resp_outs)*q_target) + tf.log(self.action_output)*self.action_output
         grads = tf.gradients(loss, self.net)
         grad_plh = []
         for var in self.net:
@@ -75,7 +75,7 @@ class PolicyAgent:
         self.sess.run(self.tr_step, feed_dict=dict(zip(self.grad_placeholders,grads)))
 
 
-def get_discounted_reward(arr, gamma=.98):
+def get_discounted_reward(arr, gamma=.99):
     ans = np.zeros_like(arr, dtype=np.float32)
     moving_rew = 0.
     for i in reversed(range(0, ans.size)):
@@ -87,7 +87,6 @@ def get_discounted_reward(arr, gamma=.98):
 def process_distances(arr):
     ans = [-1]*(len(arr))
     return ans #+ [-1] if abs(arr[-1]) > 1.6 else ans + [70]
-
 
 
 if __name__ == '__main__1':
@@ -102,8 +101,6 @@ if __name__ == '__main__1':
             i += 1
             st, dist, done = env.step(1)
         iters.append(i)
-
-
     print(np.mean(iters))
 
 if __name__ == '__main__':
@@ -114,7 +111,7 @@ if __name__ == '__main__':
 
     rounds = 10000
     update_every = 5
-    verbose = 100
+    verbose = 101
     gs = 0
     total_rewards = []
     total_len = []
@@ -144,10 +141,10 @@ if __name__ == '__main__':
             step = 0
             while True:
                 step += 1
-                act = agent.get_actions(np.reshape([state, target, state-target], (-1, 3)))[0]
+                act = agent.get_actions(np.reshape([state, target, 80.*np.sign(state-target)], (-1, 3)))[0]
                 #act = np.random.choice([0, 1, 2], p=act[0])
                 new_state, distance, done = env.step(act)
-                buffer.append([[state, target, state-target], act, distance, done])
+                buffer.append([[state, target, np.sign(state-target)*80.], act, distance, done])
                 state = new_state
                 if done:
                     buffer = np.array(buffer)
