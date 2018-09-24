@@ -30,7 +30,7 @@ class PolicyAgent:
             with tf.variable_scope('layer1'):
                 w1 = tf.get_variable('w', (self.state_dim, layer_sizes[0]))
                 b1 = tf.Variable(tf.zeros((layer_sizes[0],)), name='b')
-                l1 = tf.nn.relu(tf.matmul(state_in / 80., w1) + b1)
+                l1 = tf.nn.relu(tf.matmul(state_in, w1) + b1)
             with tf.variable_scope('layer2'):
                 w3 = tf.get_variable('w', (layer_sizes[1], self.action_dim))
                 b3 = tf.Variable(tf.zeros((self.action_dim,)), name='b')
@@ -45,12 +45,12 @@ class PolicyAgent:
         resp_inds = tf.range(0, tf.shape(self.action_output)[0])*self.action_dim + act_placeholder
         resp_outs = tf.gather(tf.reshape(self.action_output, [-1]), resp_inds)
 
-        loss = -tf.reduce_mean(tf.log(resp_outs)*q_target) + tf.log(self.action_output)*self.action_output
+        loss = - tf.reduce_mean(tf.log(resp_outs)*q_target)# + 0.1*tf.reduce_mean(tf.log(self.action_output)*self.action_output)
         grads = tf.gradients(loss, self.net)
         grad_plh = []
         for var in self.net:
             grad_plh.append(tf.placeholder(tf.float32, name=var.name[:-2]+'_holder'))
-        up = tf.train.AdamOptimizer(1e-4)
+        up = tf.train.AdamOptimizer(3e-3)
         tr_step = up.apply_gradients(zip(grad_plh, self.net))
         return q_target, act_placeholder, loss, grads, grad_plh, tr_step
 
@@ -89,29 +89,77 @@ def process_distances(arr):
     return ans #+ [-1] if abs(arr[-1]) > 1.6 else ans + [70]
 
 
-if __name__ == '__main__1':
-    import numpy as np
-    env = Env(1.7, 0.05, 0.05, 0.05, max_steps=250, range_=(40., 120.))
-    iters = []
-    for _ in range(1000):
-        env.set_manual_game(120., 40.)
-        done = False
-        i = 0
-        while not done:
-            i += 1
-            st, dist, done = env.step(1)
-        iters.append(i)
-    print(np.mean(iters))
-
 if __name__ == '__main__':
+    import gym
+    import numpy as np
+    env = gym.make('LunarLander-v2')
+    #env = gym.make('Acrobot-v1')
+    agent = PolicyAgent(env.observation_space.shape[0] , env.action_space.n)
+    step = 0
+    total_episodes = 10000
+    verbose = 50
+    update_every = 5
+    test = 100
+    max_ep_steps = 350
+    GAMMA_GRAD = .95
+    eplen = []
+    rr = []
+    grad_buffer = np.array([tf.zeros_like(k).eval(session=agent.sess) for k in agent.net])
+    for i in range(total_episodes):
+        step += 1
+        ep_buffer = []
+        state = env.reset()
+        for st in range(max_ep_steps):
+            action_distr = agent.get_action_distr(np.array([state]).reshape((1, -1)))[0]
+            act = np.random.choice(range(env.action_space.n), p=action_distr)
+            state_new, reward, done, info = env.step(act)
+            ep_buffer.append([state, act, state_new, reward])
+
+            if done or st == max_ep_steps - 1:
+                ep_buffer = np.array(ep_buffer)
+                rewards = get_discounted_reward(ep_buffer[:,3])
+                states = np.vstack(ep_buffer[:, 0])
+                actions = ep_buffer[:, 1]
+                grads = agent.get_grads(states, actions, rewards)
+                for ix, gr in enumerate(grads):
+                    grad_buffer[ix] += gr
+                    #grad_buffer[ix] = grad_buffer[ix] * GAMMA_GRAD + (1 - GAMMA_GRAD) * gr
+                eplen.append(st)
+                rr.append(np.sum(rewards))
+                break
+
+            state = state_new
+        if step % update_every == update_every - 1:
+            agent.update(grad_buffer)
+            grad_buffer = np.zeros_like(grad_buffer)
+
+        if step % verbose == verbose - 1:
+            print(f'Step {step+1} '
+                  f'mean rew {np.mean(rr[-verbose:])} '
+                  f'mean len {np.mean(eplen[-verbose:])} ')
+
+        if step % test == test - 1:
+            state = env.reset()
+            for j in range(max_ep_steps):
+                # rendering
+                env.render()
+                action_distr = agent.get_action_distr(np.array([state]).reshape((1, -1)))[0]
+                act = np.random.choice(range(env.action_space.n), p=action_distr)
+                state, reward, done, info = env.step(act)
+                if done:
+                    break
+
+
+if __name__ == '__main__1':
     import pickle
     import numpy as np
-    env = Env(max_steps=100, range_=(40., 120.))
-    agent = PolicyAgent(3, 3)
+    env = Env(max_steps=100, range_=(40., 120.), random=True)#, rand_probs=(.1, .1, .8))
+    agent = PolicyAgent(3, 3, savedir='home/user/Desktop/py/Policy/model/model.ckpt')
 
-    rounds = 10000
-    update_every = 5
+    rounds = 100000
+    update_every = 15
     verbose = 101
+    GAMMA_GRAD = .99
     gs = 0
     total_rewards = []
     total_len = []
@@ -155,7 +203,7 @@ if __name__ == '__main__':
                     rewards = -np.abs(np.asarray(get_discounted_reward(buffer[:, 2], .99)))
                     grads = agent.get_grads(states, actions, rewards)
                     for ix, gr in enumerate(grads):
-                        grad_buffer[ix] += gr
+                        grad_buffer[ix] = grad_buffer[ix]*GAMMA_GRAD + (1-GAMMA_GRAD)*gr
                     #env.set_manual_game(140., 100.)
                     env.reset()
                     #print(rewards[-1])
@@ -169,20 +217,41 @@ if __name__ == '__main__':
             all_buffer.append(buffer)
             if gs % update_every == update_every - 1:
                 agent.update(grad_buffer)
+                #grad_buffer = np.array([tf.zeros_like(k).eval(session=agent.sess) for k in agent.net])
             if r % verbose == verbose - 1:
                 print(r+1, np.mean(total_rewards[-verbose:]), np.mean(total_len[-verbose:]))
                 print(state_from, state_to, state_from - state_to)
                 print (actions)
+
+            if np.mean(total_len[-500:]) < 18:
+                print('Converged!')
+                break
     #    raise KeyboardInterrupt
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        print(e)
     finally:
         a = input("save? y/n:")
-        if a == 'n':
-            exit(0)
-        agent.save()
-        import pandas as pd
-        with open('c:/users/sabak/desktop/buffer1.pkl', 'wb') as f:
-            pickle.dump(all_buffer, f)
-            f.close()
-        pd.DataFrame(data).to_csv('c:/users/sabak/desktop/policy_results1.csv')
+        if a == 'y':
+            agent.save()
+            import pandas as pd
+            with open('c:/users/sabak/desktop/buffer1.pkl', 'wb') as f:
+                pickle.dump(all_buffer, f)
+                f.close()
+            pd.DataFrame(data).to_csv('c:/users/sabak/desktop/policy_results1.csv')
+
+        preds = []
+        xs = np.arange(1, 149, .5)
+        ys = np.arange(1, 149, .5)
+        import matplotlib.pyplot as plt
+        for i in range(len(xs)):
+            for j in range(len(ys)):
+                pr = agent.get_action_distr(np.array([xs[i], ys[j], 80. * np.sign(xs[i] - ys[j])]).reshape((1, -1)))
+                preds.append(pr)
+        print('Done!')
+
+        ss = np.array(preds).reshape((148 * 2, 148 * 2, -1))
+        plt.imshow(ss)
+        plt.show()
+        input('Press enter to exit...')
