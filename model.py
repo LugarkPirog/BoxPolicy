@@ -1,7 +1,7 @@
 import tensorflow as tf
 
 
-class PolicyAgent:
+class BasePolicyAgent:
 
     def __init__(self, state_dim, action_dim, name='Policy', savedir='c:/users/sabak/desktop/Policy/model'):
         self.state_dim = state_dim
@@ -11,14 +11,14 @@ class PolicyAgent:
         self.state_input,\
             self.action_output,\
             self.actions,\
-            self.net = self.create_network(layer_sizes=(256, 256))
+            self.net = self.create_network(layer_sizes=(256))
 
         self.q_val_target,\
             self.action_input,\
             self.loss,\
             self.grads,\
             self.grad_placeholders,\
-            self.tr_step = self.create_updater()
+            self.tr_step = self.create_updater(lr=3e-3)
 
         self.saver = tf.train.Saver(self.net)
         self.savedir = savedir
@@ -32,25 +32,25 @@ class PolicyAgent:
                 b1 = tf.Variable(tf.zeros((layer_sizes[0],)), name='b')
                 l1 = tf.nn.relu(tf.matmul(state_in, w1) + b1)
             with tf.variable_scope('layer2'):
-                w3 = tf.get_variable('w', (layer_sizes[1], self.action_dim))
+                w3 = tf.get_variable('w', (layer_sizes[0], self.action_dim))
                 b3 = tf.Variable(tf.zeros((self.action_dim,)), name='b')
                 out = tf.nn.softmax(tf.matmul(l1, w3) + b3)
             picked = tf.argmax(out, axis=-1)
             vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.name)
         return state_in, out, picked, vars
 
-    def create_updater(self):
+    def create_updater(self, lr):
         q_target = tf.placeholder(tf.float32, (None), name='q_target')
         act_placeholder = tf.placeholder(tf.int32, (None), name='action_plh')
         resp_inds = tf.range(0, tf.shape(self.action_output)[0])*self.action_dim + act_placeholder
         resp_outs = tf.gather(tf.reshape(self.action_output, [-1]), resp_inds)
 
         loss = - tf.reduce_mean(tf.log(resp_outs)*q_target)# + 0.1*tf.reduce_mean(tf.log(self.action_output)*self.action_output)
-        grads = tf.gradients(loss, self.net)
+        grads = tf.gradients(-tf.abs(loss), self.net)
         grad_plh = []
         for var in self.net:
             grad_plh.append(tf.placeholder(tf.float32, name=var.name[:-2]+'_holder'))
-        up = tf.train.AdamOptimizer(3e-3)
+        up = tf.train.AdamOptimizer(lr)
         tr_step = up.apply_gradients(zip(grad_plh, self.net))
         return q_target, act_placeholder, loss, grads, grad_plh, tr_step
 
@@ -74,6 +74,32 @@ class PolicyAgent:
     def update(self, grads):
         self.sess.run(self.tr_step, feed_dict=dict(zip(self.grad_placeholders,grads)))
 
+
+class PolicyAgent(BasePolicyAgent):
+    pass
+
+
+class RecurrentPolicyAgent(BasePolicyAgent):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def create_network(self, layer_size):
+
+        with tf.variable_scope(self.name):
+            state_in = tf.placeholder(tf.float32, (None, self.state_dim), name='state_in')
+            with tf.variable_scope('layer1'):
+                w1 = tf.get_variable('w', (self.state_dim, layer_size))
+                b1 = tf.Variable(tf.zeros((layer_size,)), name='b')
+                l1 = tf.nn.relu(tf.matmul(state_in, w1) + b1)
+            with tf.variable_scope('recurrent'):
+                lcell = tf.contrib.rnn.LSTMCell(self.action_dim, name='lstmcell')
+                state = lcell.zero_state()
+
+                picked = tf.argmax(out, axis=-1)
+            vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.name)
+
+        return state_in, out, picked, vars_
 
 def get_discounted_reward(arr, gamma=.99):
     ans = np.zeros_like(arr, dtype=np.float32)
