@@ -1,8 +1,8 @@
 import tensorflow as tf
-from BoxModel.main import Env
 
 
 class PolicyAgent:
+
     def __init__(self, state_dim, action_dim, name='Policy', savedir='c:/users/sabak/desktop/Policy/model'):
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -151,8 +151,10 @@ if __name__ == '__main__':
 
 
 if __name__ == '__main__1':
+    from BoxModel.main import Env
     import pickle
     import numpy as np
+
     env = Env(max_steps=100, range_=(40., 120.), random=True)#, rand_probs=(.1, .1, .8))
     agent = PolicyAgent(3, 3, savedir='home/user/Desktop/py/Policy/model/model.ckpt')
 
