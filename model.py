@@ -1,9 +1,23 @@
 import tensorflow as tf
 
 
+def get_discounted_reward(arr, gamma=.99):
+    ans = np.zeros_like(arr, dtype=np.float32)
+    moving_rew = 0.
+    for i in reversed(range(0, ans.size)):
+        moving_rew = moving_rew * gamma + arr[i]
+        ans[i] = moving_rew
+    return ans
+
+
+def process_distances(arr):
+    ans = [-1]*(len(arr))
+    return ans #+ [-1] if abs(arr[-1]) > 1.6 else ans + [70]
+
+
 class BasePolicyAgent:
 
-    def __init__(self, state_dim, action_dim, name='Policy', savedir='c:/users/sabak/desktop/Policy/model'):
+    def __init__(self, state_dim, action_dim, name='Policy'):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.name = name
@@ -11,7 +25,7 @@ class BasePolicyAgent:
         self.state_input,\
             self.action_output,\
             self.actions,\
-            self.net = self.create_network(layer_sizes=(256))
+            self.net = self.create_network(layer_sizes=(256,))
 
         self.q_val_target,\
             self.action_input,\
@@ -21,7 +35,6 @@ class BasePolicyAgent:
             self.tr_step = self.create_updater(lr=3e-3)
 
         self.saver = tf.train.Saver(self.net)
-        self.savedir = savedir
         self.sess.run(tf.global_variables_initializer())
 
     def create_network(self, layer_sizes):
@@ -60,11 +73,11 @@ class BasePolicyAgent:
     def get_action_distr(self, states):
         return self.sess.run(self.action_output, feed_dict={self.state_input:states})
 
-    def save(self):
-        self.saver.save(self.sess, self.savedir)
+    def save(self, savedir='c:/users/sabak/desktop/Policy/model'):
+        self.saver.save(self.sess, savedir)
 
-    def load(self):
-        self.saver.restore(self.sess, self.savedir)
+    def load(self, savedir='c:/users/sabak/desktop/Policy/model'):
+        self.saver.restore(self.sess, savedir)
 
     def get_grads(self, states, actions, rewards):
         return self.sess.run(self.grads, feed_dict={self.state_input:states,
@@ -76,46 +89,133 @@ class BasePolicyAgent:
 
 
 class PolicyAgent(BasePolicyAgent):
+    """Basic RL policy gradient agent"""
     pass
 
 
 class RecurrentPolicyAgent(BasePolicyAgent):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, max_actions=40, batch_size=1, **kwargs):
+        self.hidden_state = None
+        self.bs = batch_size
+        self.max_actions = max_actions
         super().__init__(*args, **kwargs)
 
-    def create_network(self, layer_size):
+    def create_network(self, layer_sizes):
 
         with tf.variable_scope(self.name):
             state_in = tf.placeholder(tf.float32, (None, self.state_dim), name='state_in')
             with tf.variable_scope('layer1'):
-                w1 = tf.get_variable('w', (self.state_dim, layer_size))
-                b1 = tf.Variable(tf.zeros((layer_size,)), name='b')
+                w1 = tf.get_variable('w', (self.state_dim, layer_sizes[0]))
+                b1 = tf.Variable(tf.zeros((layer_sizes[0],)), name='b')
                 l1 = tf.nn.relu(tf.matmul(state_in, w1) + b1)
             with tf.variable_scope('recurrent'):
-                lcell = tf.contrib.rnn.LSTMCell(self.action_dim, name='lstmcell')
-                state = lcell.zero_state()
 
-                picked = tf.argmax(out, axis=-1)
-            vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.name)
+                cell = tf.contrib.rnn.LSTMCell(layer_sizes[0], name='lstm')
+                lstm_outs = []
+                self.hidden_state = cell.zero_state(self.bs, tf.float32)
+                self._zero_state = self.hidden_state
+                c_in = l1
+                for i in range(self.max_actions):
+                    # print(c_in)
+                    if i > 0:
+                        c_in *= 0
+                    c_in, self.hidden_state = cell(c_in, self.hidden_state)
+                    lstm_outs.append(c_in)
+            with tf.variable_scope('layer2'):
+                w2 = tf.get_variable('w', (layer_sizes[0], self.action_dim))
+                b2 = tf.Variable(tf.zeros((self.action_dim,)), name='b')
+                outs = []
+                for v in lstm_outs:
+                    outs.append(tf.nn.softmax(tf.matmul(v, w2) + b2))
+                out = tf.stack(outs, 1)
 
+            vars_ = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.name)
+            picked = tf.argmax(out, -1)
         return state_in, out, picked, vars_
 
-def get_discounted_reward(arr, gamma=.99):
-    ans = np.zeros_like(arr, dtype=np.float32)
-    moving_rew = 0.
-    for i in reversed(range(0, ans.size)):
-        moving_rew = moving_rew * gamma + arr[i]
-        ans[i] = moving_rew
-    return ans
+    def reset_state(self):
+        self.hidden_state = self._zero_state
 
 
-def process_distances(arr):
-    ans = [-1]*(len(arr))
-    return ans #+ [-1] if abs(arr[-1]) > 1.6 else ans + [70]
+    def get_action_distr(self, state):
+        acts = self.sess.run(self.action_output, feed_dict={self.state_input:np.array([state]).reshape((1, -1))})
+        self.reset_state()
+        return acts
 
+    def get_grads(self, state, actions, rewards):
+        return self.sess.run(self.grads, feed_dict={self.state_input:np.array([state]).reshape((1, -1)),
+                                               self.action_input:actions,
+                                               self.q_val_target:rewards})
 
+## Recurrent Policy
 if __name__ == '__main__':
+    import gym
+    import numpy as np
+    env = gym.make('LunarLander-v2')
+    #env = gym.make('Acrobot-v1')
+    step = 0
+    total_episodes = 10000
+    verbose = 50
+    parallel_envs = 1 # todo: vectorEnvs - to run many at once
+    update_every = 5
+    test = 100
+    max_ep_steps = 200
+    GAMMA_GRAD = .95
+    DISC = .99
+    agent = RecurrentPolicyAgent(env.observation_space.shape[0], env.action_space.n,
+                                 max_actions=max_ep_steps, batch_size=parallel_envs)
+    eplen = []
+    rr = []
+    grad_buffer = np.array([tf.zeros_like(k).eval(session=agent.sess) for k in agent.net])
+    for i in range(total_episodes):
+        ep_buffer = []
+        step += 1
+        state = env.reset()
+        acts = agent.get_action_distr(state)[0]
+        actions = np.array([np.random.choice(range(env.action_space.n), p=probs) for probs in acts])
+        rews = np.zeros(len(actions))
+        for j, act in enumerate(actions):
+            s1, r, done, _ = env.step(act)
+            rews[j] = r
+            if done:
+                rews[j:] = 0.
+                break
+        rews = get_discounted_reward(rews, DISC)
+        grads = agent.get_grads(state, actions, rews)
+        for ix, gr in enumerate(grads):
+            grad_buffer[ix] += gr
+            # grad_buffer[ix] = grad_buffer[ix] * GAMMA_GRAD + (1 - GAMMA_GRAD) * gr
+        eplen.append(j)
+        rr.append(np.sum(rews))
+
+        if step % update_every == update_every - 1:
+            agent.update(grad_buffer)
+            grad_buffer = np.zeros_like(grad_buffer)
+
+        if step % verbose == verbose - 1:
+            print(f'Step {step+1} '
+                  f'mean rew {np.mean(rr[-verbose:])} '
+                  f'mean len {np.mean(eplen[-verbose:])} ')
+
+        if step % test == test - 1:
+            state = env.reset()
+            # rendering
+            action_distr = agent.get_action_distr(state)[0]
+            actions = np.array([np.random.choice(range(env.action_space.n), p=probs) for probs in acts])
+            for j in range(max_ep_steps):
+                env.render()
+                try:
+                    state, reward, done, info = env.step(actions[j])
+                except IndexError:
+                    print(j)
+                    break
+                if done:
+                    break
+
+
+## Policy Agent
+if __name__ == '__main__1':
     import gym
     import numpy as np
     env = gym.make('LunarLander-v2')
@@ -126,7 +226,7 @@ if __name__ == '__main__':
     verbose = 50
     update_every = 5
     test = 100
-    max_ep_steps = 350
+    max_ep_steps = 100
     GAMMA_GRAD = .95
     eplen = []
     rr = []
@@ -137,6 +237,8 @@ if __name__ == '__main__':
         state = env.reset()
         for st in range(max_ep_steps):
             action_distr = agent.get_action_distr(np.array([state]).reshape((1, -1)))[0]
+            #print(action_distr)
+            1
             act = np.random.choice(range(env.action_space.n), p=action_distr)
             state_new, reward, done, info = env.step(act)
             ep_buffer.append([state, act, state_new, reward])
