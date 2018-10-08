@@ -1,5 +1,5 @@
 import tensorflow as tf
-
+from replay import ReplayBuffer
 
 def get_discounted_reward(arr, gamma=.99):
     ans = np.zeros_like(arr, dtype=np.float32)
@@ -13,6 +13,119 @@ def get_discounted_reward(arr, gamma=.99):
 def process_distances(arr):
     ans = [-1]*(len(arr))
     return ans #+ [-1] if abs(arr[-1]) > 1.6 else ans + [70]
+
+
+class BaseQLearningAgent:
+
+    def __init__(self, max_buffer_len, state_dim, action_dim, name):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.name = name
+        self.sess = tf.Session()
+        self.buffer = ReplayBuffer(maxlen=max_buffer_len)
+        self.losses = []
+
+        self.state_input, \
+            self.q_val, \
+            self.actions, \
+            self.net = self.create_network(layer_sizes=(256,))
+
+        self.rew_input,\
+            self.action_input,\
+            self.loss,\
+            self.tr_step = self.create_updater(lr=3e-2)
+
+        self.saver = tf.train.Saver(self.net)
+        self.sess.run(tf.global_variables_initializer())
+
+    def create_network(self, layer_sizes):
+        with tf.variable_scope(self.name):
+            state_in = tf.placeholder(tf.float32, (None, self.state_dim), name='state_in')
+            with tf.variable_scope('layer1'):
+                w1 = tf.get_variable('w', (self.state_dim, layer_sizes[0]))
+                b1 = tf.Variable(tf.zeros((layer_sizes[0],)), name='b')
+                l1 = tf.nn.relu(tf.matmul(state_in, w1) + b1)
+            with tf.variable_scope('layer2'):
+                w3 = tf.get_variable('w', (layer_sizes[0], self.action_dim))
+                b3 = tf.Variable(tf.zeros((self.action_dim,)), name='b')
+                out = tf.matmul(l1, w3) + b3
+
+            picked = tf.argmax(out, axis=-1)
+            vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.name)
+        return state_in, out, picked, vars
+
+    def create_updater(self, lr):
+        q_target = tf.placeholder(tf.float32, (None), name='q_target')
+        act_placeholder = tf.placeholder(tf.int32, (None), name='action_plh')
+        resp_inds = tf.range(0, tf.shape(self.q_val)[0]) * self.action_dim + act_placeholder
+        resp_outs = tf.gather(tf.reshape(self.q_val, [-1]), resp_inds)
+
+        loss = tf.reduce_mean(tf.square(resp_outs - q_target))
+        up = tf.train.AdamOptimizer(lr)
+        tr_step = up.minimize(tf.clip_by_value(loss, -100, 100))
+
+        return q_target, act_placeholder, loss, tr_step
+
+    def get_actions(self, states):
+        return self.sess.run(self.actions, feed_dict={self.state_input:states})
+
+    def get_q_vals(self, states):
+        return self.sess.run(self.q_val, feed_dict={self.state_input: states})
+
+    def save(self, savedir='c:/users/sabak/desktop/Policy/model'):
+        self.saver.save(self.sess, savedir)
+
+    def load(self, savedir='c:/users/sabak/desktop/Policy/model'):
+        self.saver.restore(self.sess, savedir)
+
+    def update_batch(self, states, actions, rewards):
+        _, ls = self.sess.run([self.tr_step, self.loss], feed_dict={self.rew_input:rewards,
+                                               self.action_input:actions,
+                                               self.state_input:states})
+        self.losses.append(ls)
+
+    def train(self, steps=30000, batch_size=256, disc=0.99, verbose=1000):
+
+        for i in range(steps):
+            batch = np.array(self.buffer.sample(batch_size))
+            states = np.array([x for x in batch[:,0]])
+            actions = batch[:,1]
+            rewards = batch[:,2]
+            nextstates = np.array([x for x in batch[:,3]])
+            dones = np.array(batch[:,4])
+            x = self.get_q_vals(nextstates)
+            nextq = np.max(x, axis=-1)
+            target_q = rewards + disc*nextq*(1-dones)
+            self.update_batch(states, actions, target_q)
+            if i % verbose == verbose - 1:
+                print(f'Step {i+1}, loss: {np.mean(self.losses[-verbose:])}')
+        print('Trained!')
+
+    def add_observations(self, env, num):
+
+        state = env.reset()
+        for i in range(num):
+            q = self.get_q_vals([state])[0]
+            a = np.argmax(q)
+            st1, rew, done, _ = env.step(a)
+            self.buffer.add(np.array([state]), [a], [rew], np.array([st1]), [done])
+            state = st1
+            if done:
+                state = env.reset()
+        print('Buffer ready!')
+
+    def test(self, env, episodes=10):
+        st = env.reset()
+        for i in range(episodes):
+            j = 0
+            while True:
+                j+=1
+                env.render()
+                st, r, done, _ = env.step(np.argmax(self.get_q_vals([st])[0]))
+                if done:
+                    st = env.reset()
+                    print(j)
+                    break
 
 
 class BasePolicyAgent:
@@ -58,8 +171,10 @@ class BasePolicyAgent:
         resp_inds = tf.range(0, tf.shape(self.action_output)[0])*self.action_dim + act_placeholder
         resp_outs = tf.gather(tf.reshape(self.action_output, [-1]), resp_inds)
 
-        loss = - tf.reduce_mean(tf.log(resp_outs)*q_target)# + 0.1*tf.reduce_mean(tf.log(self.action_output)*self.action_output)
-        grads = tf.gradients(-tf.abs(loss), self.net)
+        loss_a = -tf.abs(tf.reduce_mean(tf.log(resp_outs)*q_target))
+        loss_b = tf.reduce_mean(tf.log(self.action_output)*self.action_output)
+        loss = loss_a + loss_b
+        grads = tf.gradients(loss, self.net)
         grad_plh = []
         for var in self.net:
             grad_plh.append(tf.placeholder(tf.float32, name=var.name[:-2]+'_holder'))
@@ -148,11 +263,25 @@ class RecurrentPolicyAgent(BasePolicyAgent):
                                                self.action_input:actions,
                                                self.q_val_target:rewards})
 
-## Recurrent Policy
+
+## Q-learning agent
 if __name__ == '__main__':
     import gym
     import numpy as np
-    env = gym.make('LunarLander-v2')
+
+    env = gym.make('CartPole-v1')
+    agent = BaseQLearningAgent(10000, env.observation_space.shape[0], env.action_space.n, 'QL')
+
+    agent.add_observations(env, num=10000)
+    agent.train(steps=30000)
+
+    agent.test(env, episodes=10)
+
+## Recurrent Policy
+if __name__ == '__main__1':
+    import gym
+    import numpy as np
+    env = gym.make('CartPole-v2')
     #env = gym.make('Acrobot-v1')
     step = 0
     total_episodes = 10000
@@ -218,7 +347,7 @@ if __name__ == '__main__':
 if __name__ == '__main__1':
     import gym
     import numpy as np
-    env = gym.make('LunarLander-v2')
+    env = gym.make('CartPole-v2')
     #env = gym.make('Acrobot-v1')
     agent = PolicyAgent(env.observation_space.shape[0] , env.action_space.n)
     step = 0
