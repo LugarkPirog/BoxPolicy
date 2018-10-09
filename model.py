@@ -17,10 +17,12 @@ def process_distances(arr):
 
 class BaseQLearningAgent:
 
-    def __init__(self, max_buffer_len, state_dim, action_dim, name):
+    def __init__(self, max_buffer_len, state_dim, action_dim, name, delta_huber, lr=1e-3):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.name = name
+        self.delta_huber = delta_huber
+        self.lr = lr
         self.sess = tf.Session()
         self.buffer = ReplayBuffer(maxlen=max_buffer_len)
         self.losses = []
@@ -28,12 +30,12 @@ class BaseQLearningAgent:
         self.state_input, \
             self.q_val, \
             self.actions, \
-            self.net = self.create_network(layer_sizes=(256,))
+            self.net = self.create_network(layer_sizes=(256,256))
 
         self.rew_input,\
             self.action_input,\
             self.loss,\
-            self.tr_step = self.create_updater(lr=3e-2)
+            self.tr_step = self.create_updater()
 
         self.saver = tf.train.Saver(self.net)
         self.sess.run(tf.global_variables_initializer())
@@ -46,7 +48,11 @@ class BaseQLearningAgent:
                 b1 = tf.Variable(tf.zeros((layer_sizes[0],)), name='b')
                 l1 = tf.nn.relu(tf.matmul(state_in, w1) + b1)
             with tf.variable_scope('layer2'):
-                w3 = tf.get_variable('w', (layer_sizes[0], self.action_dim))
+                w2 = tf.get_variable('w', (layer_sizes[0], layer_sizes[1]))
+                b2 = tf.Variable(tf.zeros((layer_sizes[1],)), name='b')
+                l2 = tf.matmul(l1, w2) + b2
+            with tf.variable_scope('layer3'):
+                w3 = tf.get_variable('w', (layer_sizes[1], self.action_dim))
                 b3 = tf.Variable(tf.zeros((self.action_dim,)), name='b')
                 out = tf.matmul(l1, w3) + b3
 
@@ -54,15 +60,20 @@ class BaseQLearningAgent:
             vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.name)
         return state_in, out, picked, vars
 
-    def create_updater(self, lr):
+    def create_updater(self):
         q_target = tf.placeholder(tf.float32, (None), name='q_target')
         act_placeholder = tf.placeholder(tf.int32, (None), name='action_plh')
         resp_inds = tf.range(0, tf.shape(self.q_val)[0]) * self.action_dim + act_placeholder
         resp_outs = tf.gather(tf.reshape(self.q_val, [-1]), resp_inds)
 
-        loss = tf.reduce_mean(tf.square(resp_outs - q_target))
-        up = tf.train.AdamOptimizer(lr)
-        tr_step = up.minimize(tf.clip_by_value(loss, -100, 100))
+        err = tf.reduce_mean(tf.abs(resp_outs-q_target))
+        # Squared loss
+        # loss = tf.reduce_mean(tf.square(resp_outs - q_target))
+        # Huber loss
+        loss = tf.cond(err < self.delta_huber, lambda: tf.square(err)/2, lambda: self.delta_huber*(err - self.delta_huber/2))
+        up = tf.train.AdamOptimizer(self.lr)
+        #tr_step = up.minimize(tf.clip_by_value(loss, -100, 100))
+        tr_step = up.minimize(loss)
 
         return q_target, act_placeholder, loss, tr_step
 
@@ -101,16 +112,19 @@ class BaseQLearningAgent:
                 print(f'Step {i+1}, loss: {np.mean(self.losses[-verbose:])}')
         print('Trained!')
 
-    def add_observations(self, env, num):
+    def add_observations(self, env, num, greedy_eps=.25, eps_decay=.996):
 
         state = env.reset()
         for i in range(num):
             q = self.get_q_vals([state])[0]
             a = np.argmax(q)
+            if np.random.rand() < greedy_eps:
+                a = np.random.randint(self.action_dim)
             st1, rew, done, _ = env.step(a)
             self.buffer.add(np.array([state]), [a], [rew], np.array([st1]), [done])
             state = st1
             if done:
+                greedy_eps *= eps_decay
                 state = env.reset()
         print('Buffer ready!')
 
@@ -118,13 +132,15 @@ class BaseQLearningAgent:
         st = env.reset()
         for i in range(episodes):
             j = 0
+            ac = []
             while True:
                 j+=1
                 env.render()
-                st, r, done, _ = env.step(np.argmax(self.get_q_vals([st])[0]))
+                ac.append(np.argmax(self.get_q_vals([st])[0]))
+                st, r, done, _ = env.step(ac[-1])
                 if done:
                     st = env.reset()
-                    print(j)
+                    print(j, r, np.mean(ac))
                     break
 
 
@@ -263,25 +279,28 @@ class RecurrentPolicyAgent(BasePolicyAgent):
                                                self.action_input:actions,
                                                self.q_val_target:rewards})
 
+#### =============================== TESTING ===================================== ####
 
 ## Q-learning agent
 if __name__ == '__main__':
     import gym
     import numpy as np
 
-    env = gym.make('CartPole-v1')
-    agent = BaseQLearningAgent(10000, env.observation_space.shape[0], env.action_space.n, 'QL')
+    # env = gym.make('CartPole-v0')
+    env = gym.make('Fake-v0')
+    agent = BaseQLearningAgent(10000, env.observation_space.shape[0], env.action_space.n, 'QL', 2., lr=1e-4)
 
-    agent.add_observations(env, num=10000)
-    agent.train(steps=30000)
-
-    agent.test(env, episodes=10)
+    for ep in range(5):
+        print('Ep', ep)
+        agent.add_observations(env, num=7500, greedy_eps=.45/(ep+1))
+        agent.train(steps=15000, batch_size=64)
+        agent.test(env, episodes=20)
 
 ## Recurrent Policy
 if __name__ == '__main__1':
     import gym
     import numpy as np
-    env = gym.make('CartPole-v2')
+    env = gym.make('CartPole-v0')
     #env = gym.make('Acrobot-v1')
     step = 0
     total_episodes = 10000
