@@ -68,7 +68,7 @@ class BaseQLearningAgent:
         # Squared loss
         # loss = tf.reduce_mean(tf.square(resp_outs - q_target))
         # Huber loss
-        loss = tf.cond(err < self.delta_huber, lambda: tf.square(err) / 2, lambda: self.delta_huber * (err - self.delta_huber / 2))
+        loss = tf.cond(err < self.delta_huber, lambda: tf.square(err) / 2, lambda: self.delta_huber * (np.abs(err) - self.delta_huber / 2))
         up = tf.train.AdamOptimizer(self.lr)
         # tr_step = up.minimize(tf.clip_by_value(loss, -100, 100))
         tr_step = up.minimize(loss)
