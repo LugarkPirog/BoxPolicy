@@ -68,7 +68,7 @@ class BaseQLearningAgent:
         # Squared loss
         # loss = tf.reduce_mean(tf.square(resp_outs - q_target))
         # Huber loss
-        loss = tf.cond(err < self.delta_huber, lambda: tf.square(err) / 2, lambda: self.delta_huber * (np.abs(err) - self.delta_huber / 2))
+        loss = tf.cond(err < self.delta_huber, lambda: tf.square(err) / 2, lambda: self.delta_huber * (err - self.delta_huber / 2))
         up = tf.train.AdamOptimizer(self.lr)
         # tr_step = up.minimize(tf.clip_by_value(loss, -100, 100))
         tr_step = up.minimize(loss)
@@ -114,9 +114,8 @@ class BaseQLearningAgent:
 
         state = env.reset()
         if state is None:
-            state = (env.get_state(), env.get_target() - env.get_state(), 0)
+            state = np.array((env.get_state(), env.get_target(), env.get_target() - env.get_state())).reshape([1, -1])
         for i in range(num):
-            state = np.array(state).reshape([1, -1])
             q = self.get_q_vals(state)[0]
             a = np.argmax(q)
             if np.random.rand() < greedy_eps:
@@ -124,31 +123,33 @@ class BaseQLearningAgent:
             try:
                 st1, rew, done, _ = env.step(a)
             except ValueError:
-                st1, rew, done = env.step(a)
-            st1 = (st1, env.get_target() - st1, 0)
-            st1 = np.array(st1).reshape([1, -1])
-            self.buffer.add(np.array(state), [a], [rew], st1, [done])
+                st1, rew, done = env.step(a+1)
+            st1 = np.array((st1, env.get_target(), env.get_target() - st1)).reshape((1,-1))
+            self.buffer.add(state, [a], [rew], st1, [done])
             state = st1
             if done:
-                greedy_eps *= .75
+                greedy_eps *= .975
                 state = env.reset()
                 if state is None:
-                    state = np.array((env.get_state(), env.get_target() - env.get_state(), 0)).reshape([1, -1])
+                    state = np.array((env.get_state(), env.get_target(), env.get_target() - env.get_state())).reshape([1, -1])
         print('Buffer ready!')
 
     def test(self, env, episodes=10):
-        st = env.reset()
+        state = env.reset()
+        if state is None:
+            state = np.array((env.get_state(), env.get_target(), env.get_target() - env.get_state())).reshape([1, -1])
         for i in range(episodes):
             j = 0
-            while True:
+            done = False
+            while not done:
                 j += 1
-                env.render()
-                st, r, done, _ = env.step(np.argmax(self.get_q_vals([st])[0]))
-                if done:
-                    st = env.reset()
-                    print(j)
-                    break
-
+                #env.render()
+                state, r, done = env.step(np.argmax(self.get_q_vals(state)[0])+1)
+                state = np.array((state, env.get_target(), env.get_target() - state)).reshape((1, -1))
+            state = env.reset()
+            if state is None:
+                state = np.array((env.get_state(), env.get_target(), env.get_target() - env.get_state())).reshape([1, -1])
+            print(j, 'Distance', r)
 
 class BasePolicyAgent:
 
@@ -167,7 +168,8 @@ class BasePolicyAgent:
         self.loss, \
         self.grads, \
         self.grad_placeholders, \
-        self.tr_step = self.create_updater(lr=3e-3)
+        self.tr_step,\
+        self.lr = self.create_updater()
 
         self.saver = tf.train.Saver(self.net)
         self.sess.run(tf.global_variables_initializer())
@@ -191,8 +193,9 @@ class BasePolicyAgent:
             vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.name)
         return state_in, out, picked, vars
 
-    def create_updater(self, lr):
+    def create_updater(self):
         q_target = tf.placeholder(tf.float32, (None), name='q_target')
+        lr = tf.placeholder(tf.float32, name='lr')
         act_placeholder = tf.placeholder(tf.int32, (None), name='action_plh')
         resp_inds = tf.range(0, tf.shape(self.action_output)[0]) * self.action_dim + act_placeholder
         resp_outs = tf.gather(tf.reshape(self.action_output, [-1]), resp_inds)
@@ -206,7 +209,7 @@ class BasePolicyAgent:
             grad_plh.append(tf.placeholder(tf.float32, name=var.name[:-2] + '_holder'))
         up = tf.train.AdamOptimizer(lr)
         tr_step = up.apply_gradients(zip(grad_plh, self.net))
-        return q_target, act_placeholder, loss, grads, grad_plh, tr_step
+        return q_target, act_placeholder, loss, grads, grad_plh, tr_step, lr
 
     def get_actions(self, states):
         return self.sess.run(self.actions, feed_dict={self.state_input: states})
@@ -225,8 +228,10 @@ class BasePolicyAgent:
                                                     self.action_input: actions,
                                                     self.q_val_target: rewards})
 
-    def update(self, grads):
-        self.sess.run(self.tr_step, feed_dict=dict(zip(self.grad_placeholders, grads)))
+    def update(self, grads, lr):
+        d = dict(zip(self.grad_placeholders, grads))
+        d[self.lr] = lr
+        self.sess.run(self.tr_step, feed_dict=d)
 
 
 class PolicyAgent(BasePolicyAgent):
