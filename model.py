@@ -146,10 +146,10 @@ class BaseQLearningAgent:
                 #env.render()
                 state, r, done = env.step(np.argmax(self.get_q_vals(state)[0])+1)
                 state = np.array((state, env.get_target(), env.get_target() - state)).reshape((1, -1))
+            print(j, 'Distance', state[0][-1])
             state = env.reset()
             if state is None:
                 state = np.array((env.get_state(), env.get_target(), env.get_target() - env.get_state())).reshape([1, -1])
-            print(j, 'Distance', r)
 
 class BasePolicyAgent:
 
