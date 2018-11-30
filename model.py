@@ -151,6 +151,7 @@ class BaseQLearningAgent:
             if state is None:
                 state = np.array((env.get_state(), env.get_target(), env.get_target() - env.get_state())).reshape([1, -1])
 
+
 class BasePolicyAgent:
 
     def __init__(self, state_dim, action_dim, name='Policy'):
@@ -200,9 +201,13 @@ class BasePolicyAgent:
         resp_inds = tf.range(0, tf.shape(self.action_output)[0]) * self.action_dim + act_placeholder
         resp_outs = tf.gather(tf.reshape(self.action_output, [-1]), resp_inds)
 
-        loss_a = -tf.abs(tf.reduce_mean(tf.log(resp_outs) * q_target))
-        loss_b = tf.reduce_mean(tf.log(self.action_output) * self.action_output)
+        loss_a = - tf.reduce_mean((tf.log(tf.clip_by_value(resp_outs, 1e-7, 1.-1e-7)) * q_target))  # clipping to prevent log(0) and log(1) as its 0
+        loss_b = - tf.reduce_mean(tf.log(tf.clip_by_value(self.action_output, 1e-7, 1.-1e-7)) * self.action_output)  # same
         loss = loss_a + loss_b
+
+        #neg_log_prob = tf.nn.softmax_cross_entropy_with_logits_v2(logits=self.action_output, labels=tf.one_hot(act_placeholder, depth=self.action_dim))
+        #loss = tf.reduce_mean(neg_log_prob*q_target)
+
         grads = tf.gradients(loss, self.net)
         grad_plh = []
         for var in self.net:
@@ -213,6 +218,11 @@ class BasePolicyAgent:
 
     def get_actions(self, states):
         return self.sess.run(self.actions, feed_dict={self.state_input: states})
+
+    def eval_loss(self, states, actions, rewards):
+        return self.sess.run(self.loss, feed_dict={self.state_input: states,
+                                                    self.action_input: actions,
+                                                    self.q_val_target: rewards})
 
     def get_action_distr(self, states):
         return self.sess.run(self.action_output, feed_dict={self.state_input: states})
@@ -444,7 +454,7 @@ if __name__ == '__main__1':
     import numpy as np
 
     env = Env(max_steps=100, range_=(40., 120.), random=True)  # , rand_probs=(.1, .1, .8))
-    agent = PolicyAgent(3, 3, savedir='home/user/Desktop/py/Policy/model/model.ckpt')
+    agent = PolicyAgent(3, 3)
 
     rounds = 100000
     update_every = 15
