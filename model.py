@@ -19,42 +19,41 @@ def process_distances(arr):
 # TODO: Add train interface to policy grad models
 class BaseQLearningAgent:
 
-    def __init__(self, max_buffer_len, state_dim, action_dim, name, delta_huber, lr=1e-3, act_replace_dct=None):
+    def __init__(self, max_buffer_len, state_dim, action_dim, name, delta_huber=2., act_replace_dct=None):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.name = name
         self.delta_huber = delta_huber
-        self.lr = lr
         self.sess = tf.Session()
         self.buffer = ReplayBuffer(maxlen=max_buffer_len)
         self.losses = []
+        self.test_dists = []
+        self.test_lens = []
         self.act_replace_dct = act_replace_dct or {a: a for a in range(self.action_dim)}
 
         self.state_input, \
         self.q_val, \
         self.actions, \
-        self.net = self.create_network(layer_sizes=(256,))
+        self.net = self.create_network(layer_sizes=(256,512,64))
 
         self.rew_input, \
         self.action_input, \
         self.loss, \
-        self.tr_step = self.create_updater()
+        self.tr_step, \
+        self.lr= self.create_updater()
 
         self.saver = tf.train.Saver(self.net)
         self.sess.run(tf.global_variables_initializer())
 
     def create_network(self, layer_sizes):
         with tf.variable_scope(self.name):
+            act = tf.nn.relu
+            sl = tf.contrib.slim
             state_in = tf.placeholder(tf.float32, (None, self.state_dim), name='state_in')
-            with tf.variable_scope('layer1'):
-                w1 = tf.get_variable('w', (self.state_dim, layer_sizes[0]))
-                b1 = tf.Variable(tf.zeros((layer_sizes[0],)), name='b')
-                l1 = tf.nn.relu(tf.matmul(state_in, w1) + b1)
-            with tf.variable_scope('layer2'):
-                w3 = tf.get_variable('w', (layer_sizes[0], self.action_dim))
-                b3 = tf.Variable(tf.zeros((self.action_dim,)), name='b')
-                out = tf.matmul(l1, w3) + b3
-
+            x = state_in
+            for i in range(len(layer_sizes)):
+                x = sl.layers.fully_connected(x, layer_sizes[i], act)
+            out = sl.layers.fully_connected(x, self.action_dim, tf.nn.softmax)
             picked = tf.argmax(out, axis=-1)
             vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.name)
         return state_in, out, picked, vars
@@ -62,19 +61,19 @@ class BaseQLearningAgent:
     def create_updater(self):
         q_target = tf.placeholder(tf.float32, (None), name='q_target')
         act_placeholder = tf.placeholder(tf.int32, (None), name='action_plh')
+        lr = tf.placeholder(tf.float32, name='lr')
         resp_inds = tf.range(0, tf.shape(self.q_val)[0]) * self.action_dim + act_placeholder
         resp_outs = tf.gather(tf.reshape(self.q_val, [-1]), resp_inds)
 
-        err = tf.reduce_mean(tf.abs(resp_outs - q_target))
+        loss = tf.reduce_mean(tf.abs(resp_outs - q_target))
         # Squared loss
         # loss = tf.reduce_mean(tf.square(resp_outs - q_target))
         # Huber loss
-        loss = tf.cond(err < self.delta_huber, lambda: tf.square(err) / 2, lambda: self.delta_huber * (err - self.delta_huber / 2))
-        up = tf.train.AdamOptimizer(self.lr)
-        # tr_step = up.minimize(tf.clip_by_value(loss, -100, 100))
+        # loss = tf.cond(err < self.delta_huber, lambda: tf.square(err) / 2, lambda: self.delta_huber * (err - self.delta_huber / 2))
+        up = tf.train.AdamOptimizer(lr)
         tr_step = up.minimize(loss)
 
-        return q_target, act_placeholder, loss, tr_step
+        return q_target, act_placeholder, loss, tr_step, lr
 
     def get_actions(self, states):
         return self.sess.run(self.actions, feed_dict={self.state_input: states})
@@ -88,13 +87,14 @@ class BaseQLearningAgent:
     def load(self, savedir='c:/users/sabak/desktop/Policy/model'):
         self.saver.restore(self.sess, savedir)
 
-    def update_batch(self, states, actions, rewards):
+    def update_batch(self, states, actions, rewards, lr):
         _, ls = self.sess.run([self.tr_step, self.loss], feed_dict={self.rew_input: rewards,
                                                                     self.action_input: actions,
-                                                                    self.state_input: states})
+                                                                    self.state_input: states,
+                                                                    self.lr: lr})
         self.losses.append(ls)
 
-    def train(self, steps=30000, batch_size=256, lr=0.1, verbose=1000):
+    def train(self, steps=30000, batch_size=256, lr=1e-3, disc=0.9, verbose=1000):
 
         for i in range(steps):
             batch = np.array(self.buffer.sample(batch_size))
@@ -104,10 +104,9 @@ class BaseQLearningAgent:
             nextstates = np.array([x for x in batch[:, 3]]).reshape(-1, self.state_dim)
             dones = np.array(batch[:, 4])
             x = self.get_q_vals(nextstates)
-            x = (x.T - x.mean(1)).T
             nextq = np.max(x, axis=-1)
-            target_q = rewards + lr * (nextq) * (1 - dones)
-            self.update_batch(states, actions, target_q)
+            target_q = rewards + disc * (nextq) * (1 - dones)
+            self.update_batch(states, actions, target_q, lr)
             if i % verbose == verbose - 1:
                 print(f'Step {i+1}, loss: {np.mean(self.losses[-verbose:])}')
         print('Trained!')
@@ -118,40 +117,43 @@ class BaseQLearningAgent:
         rews = []
         st1s = []
         dones = []
-        for i in range(num):
+        i = 0
+        while i < num:
 
             state = env.reset()
             if state is None:
-                state = np.array((env.get_state(), env.get_target(), env.get_target() - env.get_state())).reshape(
-                    [1, -1])
+                state = env.get_state()
 
-            q = self.get_q_vals(state)[0]
-            a = np.argmax(q)
-            if np.random.rand() < greedy_eps:
-                a = np.random.randint(self.action_dim)
-            try:
-                st1, rew, done, _ = env.step(self.act_replace_dct[a])
-            except ValueError:
-                st1, rew, done = env.step(self.act_replace_dct[a])
-            st1 = np.array((st1, env.get_target(), env.get_target() - st1)).reshape((1,-1))
-            states.append(state[0])
-            acts.append(a)
-            rews.append(rew)
-            st1s.append(st1[0])
-            dones.append(done)
-            state = st1
+            while True:
+                i += 1
+                try:
+                    q = self.get_q_vals(state)[0]
+                except ValueError:
+                    q = self.get_q_vals(np.array(state).reshape([1,-1]))
+                a = np.argmax(q)
+                if np.random.rand() < greedy_eps:
+                    a = np.random.randint(self.action_dim)
+                try:
+                    st1, rew, done, _ = env.step(self.act_replace_dct[a])
+                except ValueError:
+                    st1, rew, done = env.step(self.act_replace_dct[a])
+                states.append(state[0])
+                acts.append(a)
+                rews.append(rew)
+                st1s.append(st1[0])
+                dones.append(int(done))
+                state = st1
 
-            if done:
-                greedy_eps *= .975
-                state = env.reset()
-                if state is None:
-                    state = np.array((env.get_state(), env.get_target(), env.get_target() - env.get_state())).reshape([1, -1])
-                self.buffer.add(states, acts, get_discounted_reward(rews), st1s, dones)
-                states = []
-                acts = []
-                rews = []
-                st1s = []
-                dones = []
+                if done:
+                    rews = (np.array(rews) - np.mean(rews)) / (np.std(rews) + 1e-9)
+                    greedy_eps *= .999
+                    self.buffer.add(states, acts, get_discounted_reward(rews), st1s, dones)
+                    states = []
+                    acts = []
+                    rews = []
+                    st1s = []
+                    dones = []
+                    break
 
         print('Buffer ready!')
 
@@ -160,7 +162,7 @@ class BaseQLearningAgent:
         longs = []
         state = env.reset()
         if state is None:
-            state = np.array((env.get_state(), env.get_target(), env.get_target() - env.get_state())).reshape([1, -1])
+            state = env.get_state()
         for i in range(episodes):
             j = 0
             done = False
@@ -168,13 +170,14 @@ class BaseQLearningAgent:
             while not done:
                 j += 1
                 state, r, done = env.step(self.act_replace_dct[np.argmax(self.get_q_vals(state)[0])])
-                state = np.array((state, target, target - state)).reshape((1, -1))
-            dists.append(state[0][-1])
+            dists.append(state[0][2])
             longs.append(j)
             state = env.reset()
             if state is None:
-                state = np.array((env.get_state(), env.get_target(), env.get_target() - env.get_state())).reshape([1, -1])
+                state = env.get_state()
         print('Mean dist:', np.mean(np.abs(dists)),'\nMean lens:', np.mean(longs))
+        self.test_dists.extend(dists)
+        self.test_lens.extend(longs)
 
 class BasePolicyAgent:
 
@@ -186,7 +189,7 @@ class BasePolicyAgent:
         self.state_input, \
         self.action_output, \
         self.actions, \
-        self.net = self.create_network(layer_sizes=(256, 256))
+        self.net = self.create_network(layer_sizes=(256, 256, 128, 128))
 
         self.q_val_target, \
         self.action_input, \
@@ -201,19 +204,13 @@ class BasePolicyAgent:
 
     def create_network(self, layer_sizes):
         with tf.variable_scope(self.name):
+            act = tf.nn.relu
+            sl = tf.contrib.slim
             state_in = tf.placeholder(tf.float32, (None, self.state_dim), name='state_in')
-            with tf.variable_scope('layer1'):
-                w1 = tf.get_variable('w', (self.state_dim, layer_sizes[0]))
-                b1 = tf.Variable(tf.zeros((layer_sizes[0],)), name='b')
-                l1 = tf.nn.relu(tf.matmul(state_in, w1) + b1)
-            with tf.variable_scope('layer2'):
-                w2 = tf.get_variable('w', (layer_sizes[0],layer_sizes[1]))
-                b2 = tf.Variable(tf.zeros((layer_sizes[1],)), name='b')
-                l2 = tf.nn.relu(tf.matmul(l1, w2) + b2)
-            with tf.variable_scope('layer3'):
-                w3 = tf.get_variable('w', (layer_sizes[1], self.action_dim))
-                b3 = tf.Variable(tf.zeros((self.action_dim,)), name='b')
-                out = tf.nn.softmax(tf.matmul(l2, w3) + b3)
+            x = state_in
+            for i in range(len(layer_sizes)):
+                x = sl.layers.fully_connected(x, layer_sizes[i], act)
+            out = sl.layers.fully_connected(x, self.action_dim, tf.nn.softmax)
             picked = tf.argmax(out, axis=-1)
             vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, self.name)
         return state_in, out, picked, vars
@@ -225,12 +222,9 @@ class BasePolicyAgent:
         resp_inds = tf.range(0, tf.shape(self.action_output)[0]) * self.action_dim + act_placeholder
         resp_outs = tf.gather(tf.reshape(self.action_output, [-1]), resp_inds)
 
-        loss = - tf.reduce_mean((tf.log(tf.clip_by_value(resp_outs, 1e-7, 1.)) * q_target))  # clipping to prevent log(0) and log(1) as its 0
-        #loss_b = tf.reduce_mean(tf.log(tf.clip_by_value(self.action_output, 1e-7, 1.)) * self.action_output)  # same
-        #loss = loss_a + loss_b
-
-        #neg_log_prob = tf.nn.softmax_cross_entropy_with_logits_v2(logits=self.action_output, labels=tf.one_hot(act_placeholder, depth=self.action_dim))
-        #loss = tf.reduce_mean(neg_log_prob*q_target)
+        loss_a = - tf.reduce_mean((tf.log(tf.clip_by_value(resp_outs, 1e-7, 1.-1e-7)) * q_target))  # clipping to prevent log(0) and log(1) as its 0
+        loss_b = - tf.reduce_mean(tf.reduce_sum(tf.log(tf.clip_by_value(self.action_output, 1e-7, 1.-1e-7)) * self.action_output, axis=-1))  # same
+        loss = loss_a + loss_b/50
 
         grads = tf.gradients(loss, self.net)
         grad_plh = []
