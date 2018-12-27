@@ -1,20 +1,14 @@
 import tensorflow as tf
 import numpy as np
 from .replay import ReplayBuffer
-
+from scipy.signal import lfilter
 
 def get_discounted_reward(arr, gamma=.99):
-    ans = np.zeros_like(arr, dtype=np.float32)
-    moving_rew = 0.
-    for i in reversed(range(0, ans.size)):
-        moving_rew = moving_rew * gamma + arr[i]
-        ans[i] = moving_rew
-    return ans
-
+    return lfilter([1], [1, -gamma], np.array(arr)[::-1], 0)[::-1]
 
 def process_distances(arr):
     ans = [-1] * (len(arr))
-    return ans  # + [-1] if abs(arr[-1]) > 1.6 else ans + [70]
+    return ans
 
 # TODO: Add train interface to policy grad models
 class BaseQLearningAgent:
@@ -223,7 +217,7 @@ class BasePolicyAgent:
         resp_outs = tf.gather(tf.reshape(self.action_output, [-1]), resp_inds)
 
         loss_a = - tf.reduce_mean((tf.log(tf.clip_by_value(resp_outs, 1e-7, 1.-1e-7)) * q_target))  # clipping to prevent log(0) and log(1) as its 0
-        loss_b = - tf.reduce_mean(tf.reduce_sum(tf.log(tf.clip_by_value(self.action_output, 1e-7, 1.-1e-7)) * self.action_output, axis=-1))  # same
+        loss_b = tf.reduce_mean(tf.reduce_sum(tf.log(tf.clip_by_value(self.action_output, 1e-7, 1.-1e-7)) * self.action_output, axis=-1))  # same
         loss = loss_a + loss_b/50
 
         grads = tf.gradients(loss, self.net)
@@ -265,6 +259,16 @@ class BasePolicyAgent:
 class PolicyAgent(BasePolicyAgent):
     """Basic RL policy gradient agent"""
     pass
+
+
+class PPO(BasePolicyAgent):
+    def __init__(self, *args, clip_epsilon=.2, **kwargs):
+        self.clip_eps = clip_epsilon
+        super().__init__(*args, **kwargs)
+
+    def create_updater(self):
+
+        pass
 
 
 class RecurrentPolicyAgent(BasePolicyAgent):
